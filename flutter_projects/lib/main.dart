@@ -38,96 +38,63 @@ class _UDSControlState extends State<UDSControl> {
   TextEditingController logController = TextEditingController();
   String requests = '';
   String descriptions = '';
+  String? idToken;
   bool isRunning = false;
   bool showForm = false;
 
-  // Adiciona dados ao arquivo CSV
-  Future<void> addDataToCsv(List<String> newRow) async {
-    try {
-      final directory = await getApplicationDocumentsDirectory();
-      final path = '${directory.path}/uds_log.csv';
-      final file = File(path);
+  Future<void> createLogSession(String ip) async {
+    final url = Uri.parse(
+      'https://espcan-8e413-default-rtdb.firebaseio.com/logs.json'
+    );
 
-      List<List<dynamic>> csvData = [];
-
-      if (await file.exists()) {
-        final existingContent = await file.readAsString();
-        if (existingContent.trim().isNotEmpty) {
-          csvData = const CsvToListConverter().convert(existingContent);
-        }
-      }
-
-      csvData.add(newRow);
-
-      final csvContent = const ListToCsvConverter().convert(csvData);
-      await file.writeAsString(csvContent);
-
-      print('Data added to CSV: $newRow');
-
-    } catch (e) {
-      print('Error writing to CSV: $e');
+    final response = await http.post(
+      url,
+      headers: {"Content-Type": "application/json"},
+      body: json.encode({
+        "startedAt": DateTime.now().toIso8601String(),
+      }),
+    );
+    if (response.statusCode == 200) {
+      final data = json.decode(response.body);
+      idToken = data["name"]; // chave gerada pelo Firebase
+      print("Sessão criada: $idToken");
+    } else {
+      throw Exception("Erro ao criar sessão");
     }
   }
 
-  // Limpa o csv
-  Future<void> clearCsv() async {
-    try {
-      final directory = await getApplicationDocumentsDirectory();
-      final path = '${directory.path}/uds_log.csv';
-      final file = File(path);
-
-      if (await file.exists()) {
-        await file.writeAsString(''); // Limpa o conteúdo do arquivo
-        print('CSV file cleared');
-      } else {
-        print('CSV file does not exist');
-      }
-    } catch (e) {
-      print('Error clearing CSV: $e');
-    }
+  Future<String> fakeEspLog() async {
+    await Future.delayed(const Duration(milliseconds: 200));
+    return "RX CAN 0x7E8 [8] 50 03 22 F1 90";
   }
-
-  // Limpa o log na interface e no ESP32
-  /*
-  Future<void> clearLog(String ip) async {
-    while(isRunning) {
-      final log = await fetchStructuredLog(ip);
-      if (log.isNotEmpty) {
-        for (var entry in log) {
-          await addDataToCsv([
-            "${entry['timestamp'] ?? ''}",
-            "${entry['channel'] ?? ''}",
-            "${entry['canType'] ?? ''}",
-            "${entry['frameType'] ?? ''}",
-            "${entry['canId'] ?? ''}",
-            "${entry['dlc'] ?? ''}",
-            "${entry['data'] ?? ''}",
-            "${entry['label'] ?? ''}",
-          ]);
-        }
-      }
-      var url = Uri.parse('http://$ip/clear_log');
-      var response = await http.get(url);
-      if (response.statusCode == 200) {
-        setState(() {
-          logController.text = ""; requests = ""; descriptions = "";
-        });
-      }
-      await Future.delayed(Duration(seconds: 10)); // Aguarda 5 segundos antes de tentar limpar novamente
-    }
-  }*/
 
   // Envio de requisições UDS
   Future<void> startUDSRequests(String ip) async {
+    await createLogSession(ip);
     var url = Uri.parse('http://$ip/start');
-    var response = await http.get(url);
+    setState(() {
+        isRunning = true;
+      });
+    fetchLog(ip);
+    /* var response = await http.get(url);
     if (response.statusCode == 200) {
       setState(() {
         isRunning = true;
       });
       fetchLog(ip);
-      // clearLog(ip);    
-    }
+      // clearLog(ip);
+    }*/
+  }
+
+  Future<void> pushLogEntry(Map<String, dynamic> entry) async {
+    if(!isRunning || idToken == null) return;
+
+    final url = Uri.parse('https://espcan-8e413-default-rtdb.firebaseio.com/logs/$idToken/entries.json');
+    await http.post(
+      url,
+      headers: {"Content-Type": "application/json"},
+      body: json.encode(entry),
+    );
   }
 
   // Envio direto de uma requisição UDS
@@ -159,7 +126,13 @@ class _UDSControlState extends State<UDSControl> {
   Future<void> fetchLog(String ip) async {
     while (isRunning) {
       var url = Uri.parse('http://$ip/log');
-      var response = await http.get(url);
+      // var response = await http.get(url);
+      final fakeResponse = await fakeEspLog(); // Simula resposta do ESP32
+      await pushLogEntry({
+        'timestamp': DateTime.now().toIso8601String(),
+        'raw': fakeResponse
+      });
+      /*
       if (response.statusCode == 200) {
         setState(() {
           logController.text = response.body;
@@ -172,8 +145,8 @@ class _UDSControlState extends State<UDSControl> {
           String byte2 = match.group(2)!;
           callServerFunction('$byte1 $byte2');
         }
-      }
-      await Future.delayed(Duration(seconds: 1)); // Atualiza o log a cada 1 segundo
+      }*/
+      await Future.delayed(const Duration(milliseconds: 300));
     }
   }
 
@@ -212,73 +185,6 @@ class _UDSControlState extends State<UDSControl> {
       setState(() {
         logController.text += "\n[DLL Response]: ${response.body}";
       });
-    }
-  }
-
-  // Envia o log estruturado para o Firebase
-  Future<void> sendLogToFirebase(List<Map<String, dynamic>> logEntries) async {
-    final url = Uri.parse('https://espcan-8e413-default-rtdb.firebaseio.com/logs.json');    
-    final response = await http.post(
-      url,
-      headers: {"Content-Type": "application/json"},
-      body: json.encode({
-        'timestamp': DateTime.now().toIso8601String(),
-        'logEntries': logEntries,
-      }),
-    );
-
-    if(response.statusCode == 200) {
-      print("Log enviado com sucesso para o Firebase");
-    } else {
-      print("Erro ao enviar log para o Firebase: ${response.statusCode}");
-    }
-  }
-
-  Future<void> sendCsvToFirebase() async {
-    try {
-      final directory = await getApplicationDocumentsDirectory();
-      final path = '${directory.path}/uds_log.csv';
-      final file = File(path);
-
-      if (!await file.exists()) {
-        print("CSV não encontrado em: $path");
-        return;
-      }
-
-      final csvContent = await file.readAsString();
-      final rows = const CsvToListConverter().convert(csvContent);
-
-      // Ordem das colunas esperada
-      final headers = [
-        "timestamp",
-        "channel",
-        "canType",
-        "frameType",
-        "canId",
-        "dlc",
-        "data",
-        "label"
-      ];
-
-      // Transforma cada linha em Map<String, dynamic>
-      final List<Map<String, dynamic>> logEntries = rows.map((row) {
-        final Map<String, dynamic> entry = {};
-        for (int i = 0; i < headers.length && i < row.length; i++) {
-          if (headers[i] == "canId") {
-            // força para int e converte para hexadecimal no formato 0x
-            final int id = row[i] is num ? row[i].toInt() : int.tryParse(row[i].toString()) ?? 0;
-            entry["canId"] = "0x${id.toRadixString(16).toUpperCase()}";
-          } else {
-            entry[headers[i]] = row[i].toString();
-          }
-        }
-        return entry;
-      }).toList();
-
-      // Agora envia pro Firebase
-      await sendLogToFirebase(logEntries);
-    } catch (e) {
-      print("Erro ao enviar CSV para Firebase: $e");
     }
   }
 
@@ -360,24 +266,6 @@ class _UDSControlState extends State<UDSControl> {
                   // clearLog(ipController.text);
                 },
                 child: Text("Clear Log"),
-              ),
-              SizedBox(width: 10),
-              ElevatedButton(
-                onPressed: () async {
-                  try {
-                    await sendCsvToFirebase();
-                    ScaffoldMessenger.of(context).showSnackBar(
-                        SnackBar(content: Text("Log salvo com sucesso"))
-                      );
-                    await clearCsv();
-                    stopUDSRequests(ipController.text);
-                  } catch (e) {
-                    ScaffoldMessenger.of(context).showSnackBar(
-                        SnackBar(content: Text("Erro ao salvar log: $e"))
-                      );
-                  }
-                },
-                child: Text("Salvar Log"),
               ),
             ],
           ),
