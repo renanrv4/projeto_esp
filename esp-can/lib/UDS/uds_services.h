@@ -1,8 +1,6 @@
 #ifndef UDS_H
 #define UDS_H
 
-#define RAM_LOG_SIZE 32
-
 enum LogLabel : uint8_t {
     LABEL_NORMAL = 0,
     LABEL_ATTACK = 1,
@@ -17,12 +15,6 @@ struct CANLogBin {
     uint8_t label;        // 1 byte
 } __attribute__((packed));
 
-extern CANLogBin ramLog[RAM_LOG_SIZE];
-extern volatile uint8_t ramLogIndex;
-extern volatile uint8_t ramLogCount;
-
-void addToRamLog(const CANLogBin& entry);
-void flushRamLogToSPIFFS();
 String convertDecimalToHex(long int decimalNumber);
 String convertBytesToString(const byte* data, size_t length);
 
@@ -44,7 +36,6 @@ void sendKey(String key);
 void writeDataByIdAppSwFingerprint(); //line 35
 void writeDataByIdAppDataFingerprint(); //line 42
 void sendRoutineControleEraseMemory(); //line 49
-void sendTesterPresent();
 void sendRoutineControlCheckRoutine(); //line 75
 void sendDownloadRequest(); //line 77
 //void sendStartTransferData(); //line 81
@@ -60,11 +51,13 @@ void sendECUReset(); //line 139666
 
 //bool udsIsBlockAcked();
 
+// Log queue
+extern QueueHandle_t logQueue;
+
 extern String logBuffer;
 //extern int CS_PIN;
 extern MCP_CAN CAN;
 extern SemaphoreHandle_t canMutex;
-extern SemaphoreHandle_t logMutex;
 extern unsigned long startTime;
 
 #endif

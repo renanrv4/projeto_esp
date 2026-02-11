@@ -147,10 +147,8 @@ void receiveCANMessage(String labelClass="NORMAL") {
             memcpy(entry.data, rxBuf, len);
             entry.label = LABEL_NORMAL;
 
-            addToRamLog(entry);
-
-            if (ramLogCount == RAM_LOG_SIZE) {
-                flushRamLogToSPIFFS();
+            if (xQueueSend(logQueue, &entry, 0) != pdTRUE) {
+                droppedLogs++;
             }
 
             if(rxBuf[0] == 0x01 && rxBuf[1] == 0x77) exited = true;
@@ -587,75 +585,39 @@ void setup() {
     CAN.setMode(MCP_NORMAL);
     pinMode(CAN_INT_PIN, INPUT);
 
-    if (!SPIFFS.begin()) { SPIFFS.format(); SPIFFS.begin(); }
-    logMutex = xSemaphoreCreateMutex();
+    logQueue = xQueueCreate(128, sizeof(CANLogBin));
+    if(logQueue == NULL) {
+        Serial.println("Error creating log queue");
+        while(1);
+    }
 
     server.on("/start", HTTP_GET, []() { startRequests = true; startOTAUpdate = false; startTime = millis(); server.send(200, "text/plain", "UDS requests started"); });
     server.on("/stop", HTTP_GET, []() { startRequests = false; startOTAUpdate = false; server.send(200, "text/plain", "UDS requests stopped"); });
-    server.on("/log", HTTP_GET, []() { server.send(200, "text/plain", logBuffer); });
+    // server.on("/log", HTTP_GET, []() { server.send(200, "text/plain", logBuffer); });
     // server.on("/clear_log", HTTP_GET, []() { logBuffer = ""; canLog.clear(); server.send(200, "text/plain", "Log cleared"); });
     server.on("/ota_update", HTTP_GET, []() { urlUpdate = server.arg("url_update"); startRequests = false; startOTAUpdate = true; server.send(200, "text/plain", "Starting OTA Update for version: " + urlUpdate); });
-    server.on("/download_bin", HTTP_GET, []() {
-        File f = SPIFFS.open("/can.bin", "r");
-        if (!f) {
-            server.send(404, "text/plain", "File not found");
-            return;
-        }
-    
-        server.streamFile(f, "application/octet-stream");
-        f.close();
-    });
     server.on("/structured_log", HTTP_GET, []() {
-        /*
-        String response = "[";
-        for(size_t i = 0; i < canLog.size(); i++) {
-            const CANLogEntry& entry = canLog[i];
-            response += "{";
-            response += "\"timestamp\":" + String(entry.timestamp, 6) + ",";
-            response += "\"channel\":\"" + entry.channel + "\",";
-            response += "\"canType\":\"" + entry.canType + "\",";
-            response += "\"frameType\":\"" + entry.frameType + "\",";
-            response += "\"canId\":\"" + entry.canId + "\",";
-            response += "\"dlc\":" + String(entry.dlc) + ",";
-            response += "\"data\":\"" + entry.data + "\",";
-            response += "\"label\":\"" + entry.label + "\"";
-            response += "}";
-
-            if (i < canLog.size() - 1) { response += ","; }
-        }
-        response += "]";
-        server.send(200, "application/json", response);
-        */
-        File f = SPIFFS.open("/can.bin", "r");
-        server.sendContent("[");
-        bool first = true;
-        
-        while (f.available()) {
-            CANLogBin e;
-            f.read((uint8_t*)&e, sizeof(e));
-
-            if (!first) server.sendContent(",");
-            first = false;
+        CANLogBin entry;
+        if (xQueueReceive(logQueue, &entry, 0) == pdTRUE) {
+            String json = "{";
+            json += "\"timestamp\":" + String(entry.timestamp, 6) + ",";
+            json += "\"canId\":\"0x" + String(entry.canId, HEX) + "\",";
+            json += "\"dlc\":" + String(entry.dlc) + ",";
+            json += "\"data\":\"";
             
-            server.sendContent("{");
-            server.sendContent("\"timestamp\":" + String(e.timestamp,6) + ",");
-            server.sendContent("\"canId\":\"0x" + String(e.canId, HEX) + "\",");
-            server.sendContent("\"dlc\":" + String(e.dlc) + ",");
-            server.sendContent("\"data\":\"");
-            
-            for (int i = 0; i < e.dlc; i++) {
-                if (e.data[i] < 0x10) server.sendContent("0");
-                server.sendContent(String(e.data[i], HEX));
-                if (i < e.dlc-1) server.sendContent(" ");
+            for (int i = 0; i < entry.dlc; i++) {
+                if (entry.data[i] < 0x10) json += "0";
+                json += String(entry.data[i], HEX);
+                if (i < entry.dlc - 1) json += " ";
             }
             
-            server.sendContent("\",");
-            server.sendContent("\"label\":" + String(e.label));
-            server.sendContent("}");
+            json += "\",";
+            json += "\"label\":" + String(entry.label);
+            json += "}";
+            server.send(200, "application/json", json);
+        } else {
+            server.send(204);
         }
-        
-        server.sendContent("]");
-        f.close();
     });
     server.begin();
 
@@ -685,13 +647,9 @@ void loop() {
       alreadyDownloaded = true;
     }
   }*/
-  // if(startRequests) {
-  startRequests = true; startOTAUpdate = false; server.send(200, "text/plain", "UDS requests started");
-  if (millis() - lastFlush > 1000) {
-    flushRamLogToSPIFFS();
-    lastFlush = millis();
-  }
-  // }
+  /*if(startRequests) {
+    startOTAUpdate = false; server.send(200, "text/plain", "UDS requests started");
+  }*/
   // Small delay to yield CPU to FreeRTOS tasks
   vTaskDelay(50 / portTICK_PERIOD_MS);
 }

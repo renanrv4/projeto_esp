@@ -16,55 +16,17 @@ const long FUNC_REQUEST_ID = 0x18DA40F1;
 const long PHYS_REQUEST_ID = 0x18DA40F1;
 const long PHYS_RESPONSE_ID = 0x18DAF140;
 
-CANLogBin ramLog[RAM_LOG_SIZE];
-volatile uint8_t ramLogIndex = 0;
-volatile uint8_t ramLogCount = 0;
-
 extern uint8_t ackBlock;
 
+QueueHandle_t logQueue;
 String logBuffer = "";
 const int CS_PIN = 4;
 MCP_CAN CAN(CS_PIN);
 SemaphoreHandle_t canMutex;
-SemaphoreHandle_t logMutex;
 
 unsigned long startTime;
 
 // ================== UTILITIES ==================
-void addToRamLog(const CANLogBin& entry) {
-    if (xSemaphoreTake(logMutex, portMAX_DELAY)) {
-        ramLog[ramLogIndex] = entry;
-        ramLogIndex = (ramLogIndex + 1) % RAM_LOG_SIZE;
-        if (ramLogCount < RAM_LOG_SIZE)
-            ramLogCount++;
-        xSemaphoreGive(logMutex);
-    }
-}
-
-void flushRamLogToSPIFFS() {
-    if (!xSemaphoreTake(logMutex, portMAX_DELAY)) return;
-
-    if (ramLogCount == 0) {
-        xSemaphoreGive(logMutex);
-        return;
-    }
-
-    File f = SPIFFS.open("/can.bin", FILE_APPEND);
-    if (!f) {
-        xSemaphoreGive(logMutex);
-        return;
-    }
-
-    uint8_t start = (ramLogIndex + RAM_LOG_SIZE - ramLogCount) % RAM_LOG_SIZE;
-    for (uint8_t i = 0; i < ramLogCount; i++) {
-        uint8_t idx = (start + i) % RAM_LOG_SIZE;
-        f.write((uint8_t*)&ramLog[idx], sizeof(CANLogBin));
-    }
-    f.close();
-    ramLogCount = 0;
-    xSemaphoreGive(logMutex);
-}
-
 String convertDecimalToHex(long int decimalNumber) {
     long int remainder,quotient;
     int i=1,j,temp;
@@ -105,25 +67,22 @@ String convertBytesToString(const byte* data, size_t length) {
 }
 
 void sendMessage(const long id, byte* data, byte len, const char* description, String labelClass) {
-    String requestString = convertBytesToString(data, len);
-    if (CAN.sendMsgBuf(id, 1, len, data) == CAN_OK) {
-        logBuffer += String("Sent: ") + description + "\n";
-        CANLogBin entry;
-        entry.timestamp = (millis() - startTime) / 1000.0;
-        entry.canId = id;
-        entry.dlc = len;
-        memcpy(entry.data, data, len);
-        entry.label = LABEL_NORMAL;
-        addToRamLog(entry);
+    CANLogBin entry;
+    entry.timestamp = (millis() - startTime) / 1000.0;
+    entry.canId = id;
+    entry.dlc = len;
+    memcpy(entry.data, data, len);
+    entry.label = LABEL_NORMAL;
+    if (xSemaphoreTake(canMutex, pdMS_TO_TICKS(10))) {
+        if (CAN.sendMsgBuf(id, 1, len, data) != CAN_OK) {
+            entry.label = LABEL_FAULT;
+        }
+        xSemaphoreGive(canMutex);
     } else {
-        logBuffer += String("Error: Failed to send ") + description + "\n";
-        CANLogBin entry;
-        entry.timestamp = (millis() - startTime) / 1000.0;
-        entry.canId = id;
-        entry.dlc = 0;
-        memset(entry.data, 0, 8);
         entry.label = LABEL_FAULT;
-        addToRamLog(entry);
+    }
+    if (xQueueSend(logQueue, &entry, 0) != pdTRUE) {
+        droppedLogs++;
     }
 }
 
