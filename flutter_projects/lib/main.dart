@@ -63,6 +63,13 @@ class _UDSControlState extends State<UDSControl> {
     }
   }
 
+  /* Função para simular resposta do ESP32 durante desenvolvimento sem o hardware
+  Future<String> fakeEspLog() async {
+    await Future.delayed(const Duration(milliseconds: 200));
+    return "RX CAN 0x7E8 [8] 50 03 22 F1 90";
+  }
+  */
+
   // Envio de requisições UDS
   Future<void> startUDSRequests(String ip) async {
     await createLogSession(ip);
@@ -72,7 +79,7 @@ class _UDSControlState extends State<UDSControl> {
       setState(() {
         isRunning = true;
       });
-      fetchStructuredLog(ip);
+      fetchLog(ip);
       // clearLog(ip);
     }
   }
@@ -114,29 +121,49 @@ class _UDSControlState extends State<UDSControl> {
   }
 
   // Atualiza o estado atual do log
-  Future<void> fetchStructuredLog(String ip) async {
+  Future<void> fetchLog(String ip) async {
     while (isRunning) {
-      final url = Uri.parse('http://$ip/structured_log');
-      final response = await http.get(url);
-
+      var url = Uri.parse('http://$ip/log');
+      var response = await http.get(url);
+      // final fakeResponse = await fakeEspLog(); // Simula resposta do ESP32
+      
       if (response.statusCode == 200) {
-        final decoded = json.decode(response.body);
-        final List logs = decoded['logs'];
-
-        for (final log in logs) {
-          await pushLogEntry(log);
-        }
-
-        if (logs.isNotEmpty) {
-          await http.post(
-            Uri.parse('http://$ip/structured_log/ack'),
-            headers: {"Content-Type": "application/json"},
-            body: json.encode({"count": logs.length}),
-          );
+        await pushLogEntry({
+          'timestamp': DateTime.now().toIso8601String(),
+          'raw': response.body
+        });
+        setState(() {
+          logController.text = response.body;
+        });
+        // Check if log contains "50 3 XX XX"
+        RegExp pattern = RegExp(r'50 3 (\S+) (\S+)');
+        Match? match = pattern.firstMatch(response.body);
+        if (match != null) {
+          String byte1 = match.group(1)!;
+          String byte2 = match.group(2)!;
+          callServerFunction('$byte1 $byte2');
         }
       }
+      await Future.delayed(const Duration(milliseconds: 300));
+    }
+  }
 
-      await Future.delayed(const Duration(milliseconds: 200));
+  // Atualiza o estado atual do log estruturado para envio ao Firebase
+  Future<List<Map<String, dynamic>>> fetchStructuredLog(String ip) async {
+    final url = Uri.parse('http://$ip/structured_log');
+    final response = await http.get(url);
+
+    if (response.statusCode == 200) {
+      try {
+        final List<dynamic> jsonData = json.decode(response.body);
+        return List<Map<String, dynamic>>.from(jsonData);
+      } catch (e) {
+        print("Erro ao decodificar JSON do structured_log: $e");
+        return [];
+      }
+    } else {
+      print("Erro ao buscar structured_log: ${response.statusCode}");
+      return [];
     }
   }
 
