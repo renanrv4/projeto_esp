@@ -59,5 +59,5 @@ extern String logBuffer;
 extern MCP_CAN CAN;
 extern SemaphoreHandle_t canMutex;
 extern unsigned long startTime;
-
+extern int droppedLogs;
 #endif

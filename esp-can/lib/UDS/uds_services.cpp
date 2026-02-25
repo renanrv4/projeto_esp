@@ -23,6 +23,7 @@ String logBuffer = "";
 const int CS_PIN = 4;
 MCP_CAN CAN(CS_PIN);
 SemaphoreHandle_t canMutex;
+int droppedLogs = 0;
 
 unsigned long startTime;
 
@@ -73,12 +74,7 @@ void sendMessage(const long id, byte* data, byte len, const char* description, S
     entry.dlc = len;
     memcpy(entry.data, data, len);
     entry.label = LABEL_NORMAL;
-    if (xSemaphoreTake(canMutex, pdMS_TO_TICKS(10))) {
-        if (CAN.sendMsgBuf(id, 1, len, data) != CAN_OK) {
-            entry.label = LABEL_FAULT;
-        }
-        xSemaphoreGive(canMutex);
-    } else {
+    if (CAN.sendMsgBuf(id, 1, len, data) != CAN_OK) {
         entry.label = LABEL_FAULT;
     }
     if (xQueueSend(logQueue, &entry, 0) != pdTRUE) {

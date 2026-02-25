@@ -110,7 +110,7 @@ void receiveCANMessage(String labelClass="NORMAL") {
             output = logBuffer;
             
             //===================================================================
-            // Se output.indexOf não funcionar usar dataComp == "String"
+            // Se output.indexOf não funcionar usar dataComp == "String"       //
             //===================================================================
 
             // === State transitions ===
@@ -585,18 +585,22 @@ void setup() {
     CAN.setMode(MCP_NORMAL);
     pinMode(CAN_INT_PIN, INPUT);
 
+    if (!SPIFFS.begin()) { SPIFFS.format(); SPIFFS.begin(); }
+
     logQueue = xQueueCreate(128, sizeof(CANLogBin));
     if(logQueue == NULL) {
         Serial.println("Error creating log queue");
         while(1);
+    } else {
+        Serial.println("Log queue created successfully");
     }
 
-    server.on("/start", HTTP_GET, []() { startRequests = true; startOTAUpdate = false; startTime = millis(); server.send(200, "text/plain", "UDS requests started"); });
+    server.on("/start", HTTP_GET, []() { startRequests = true; startOTAUpdate = false; startTime = millis(); server.send(200, "text/plain", "UDS requests started"); Serial.println("UDS requests started"); });
     server.on("/stop", HTTP_GET, []() { startRequests = false; startOTAUpdate = false; server.send(200, "text/plain", "UDS requests stopped"); });
     // server.on("/log", HTTP_GET, []() { server.send(200, "text/plain", logBuffer); });
     // server.on("/clear_log", HTTP_GET, []() { logBuffer = ""; canLog.clear(); server.send(200, "text/plain", "Log cleared"); });
     server.on("/ota_update", HTTP_GET, []() { urlUpdate = server.arg("url_update"); startRequests = false; startOTAUpdate = true; server.send(200, "text/plain", "Starting OTA Update for version: " + urlUpdate); });
-    server.on("/structured_log", HTTP_GET, []() {
+    server.on("/log", HTTP_GET, []() {
         CANLogBin entry;
         if (xQueueReceive(logQueue, &entry, 0) == pdTRUE) {
             String json = "{";
@@ -649,7 +653,8 @@ void loop() {
   }*/
   /*if(startRequests) {
     startOTAUpdate = false; server.send(200, "text/plain", "UDS requests started");
-  }*/
+    Serial.println("UDS requests started");
+  } */
   // Small delay to yield CPU to FreeRTOS tasks
   vTaskDelay(50 / portTICK_PERIOD_MS);
 }
